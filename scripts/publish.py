@@ -1,10 +1,7 @@
 """
-Reads the current week's manifest under content/<week>/manifest.json,
-uploads each day's video to Cloudinary, then schedules a Buffer post
-per channel for each day via Buffer's GraphQL API.
-
-This runs on GitHub's own infrastructure (Actions runner), NOT inside
-Anthropic's Cowork sandbox -- so it isn't subject to that egress block.
+Builds each day's video (real Pexels footage + text overlay), uploads it to
+Cloudinary, then schedules a Buffer post per channel -- all on GitHub's own
+infrastructure, so none of this depends on Anthropic's Cowork sandbox network.
 """
 import hashlib
 import json
@@ -15,10 +12,14 @@ from datetime import datetime, timezone
 
 import requests
 
+sys.path.insert(0, os.path.dirname(__file__))
+from video_lib import build_video, hex2rgb  # noqa: E402
+
 CLOUD_NAME = os.environ["CLOUDINARY_CLOUD_NAME"]
 API_KEY = os.environ["CLOUDINARY_API_KEY"]
 API_SECRET = os.environ["CLOUDINARY_API_SECRET"]
 BUFFER_TOKEN = os.environ["BUFFER_ACCESS_TOKEN"]
+PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY")
 
 BUFFER_GRAPHQL_URL = "https://api.buffer.com"
 
@@ -57,7 +58,7 @@ def upload_to_cloudinary(video_path: str, public_id: str, folder: str) -> str:
     with open(video_path, "rb") as f:
         files = {"file": f}
         data = {**params, "api_key": API_KEY, "signature": signature}
-        resp = requests.post(url, files=files, data=data, timeout=120)
+        resp = requests.post(url, files=files, data=data, timeout=180)
 
     resp.raise_for_status()
     result = resp.json()
@@ -109,13 +110,32 @@ def main():
         manifest = json.load(f)
 
     channels = manifest["channels"]  # {"tiktok": "...", "youtube": "...", "facebook": "..."}
+    build_dir = "/tmp/build"
+    os.makedirs(build_dir, exist_ok=True)
 
     for day in manifest["days"]:
         n = day["day"]
-        video_path = os.path.join(week_dir, day["video_filename"])
-        public_id = f"{manifest['theme_slug']}_day{n}_{day['date'].replace('-', '')}"
 
-        print(f"Uploading Day {n} ({video_path}) to Cloudinary...")
+        lines = [day["featured_quote"]] + day["script_lines"] + [day["cta_bundle"], day["cta_reply"]]
+        video_path = os.path.join(build_dir, f"day{n}.mp4")
+
+        print(f"Building Day {n} video ({day['subtheme']})...")
+        build_video(
+            out_path=video_path,
+            lines=lines,
+            top_hex=day["palette_top"],
+            bottom_hex=day["palette_bottom"],
+            seed=n,
+            sec_per_line=3.4,
+            fps=30,
+            motion=day["motion"],
+            accent_color=hex2rgb(day["text_color_hex"]),
+            pexels_term=day.get("pexels_term"),
+            pexels_api_key=PEXELS_API_KEY,
+        )
+
+        public_id = f"{manifest['theme_slug']}_day{n}_{day['date'].replace('-', '')}"
+        print(f"Uploading Day {n} to Cloudinary...")
         secure_url = upload_to_cloudinary(
             video_path, public_id, "Weekly Emotional Wellness Content Plan + Videos"
         )
