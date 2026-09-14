@@ -1,0 +1,37 @@
+name: Test Video Build (no posting)
+
+on:
+  workflow_dispatch:
+    inputs:
+      day:
+        description: 'Which day number to test-build (1-7)'
+        required: true
+        default: '1'
+
+jobs:
+  build-test-video:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies
+        run: pip install requests pillow numpy
+
+      - name: Build one test video
+        env:
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          TEST_DAY: ${{ github.event.inputs.day }}
+        run: python scripts/test_build_one.py
+
+      - name: Upload test video as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-video-day-${{ github.event.inputs.day }}
+          path: test_day*.mp4
