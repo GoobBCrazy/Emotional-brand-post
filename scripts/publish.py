@@ -1,7 +1,7 @@
 """
 Reads the current week's manifest under content/<week>/manifest.json,
 uploads each day's video to Cloudinary, then schedules a Buffer post
-per channel for each day.
+per channel for each day via Buffer's GraphQL API.
 
 This runs on GitHub's own infrastructure (Actions runner), NOT inside
 Anthropic's Cowork sandbox -- so it isn't subject to that egress block.
@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 
 import requests
 
@@ -19,12 +20,24 @@ API_KEY = os.environ["CLOUDINARY_API_KEY"]
 API_SECRET = os.environ["CLOUDINARY_API_SECRET"]
 BUFFER_TOKEN = os.environ["BUFFER_ACCESS_TOKEN"]
 
-BUFFER_API = "https://api.bufferapp.com/1"
+BUFFER_GRAPHQL_URL = "https://api.buffer.com"
+
+CREATE_POST_MUTATION = """
+mutation CreatePost($input: CreatePostInput!) {
+  createPost(input: $input) {
+    __typename
+    ... on PostActionSuccess {
+      post { id status }
+    }
+    ... on MutationError {
+      message
+    }
+  }
+}
+"""
 
 
 def cloudinary_signature(params: dict, api_secret: str) -> str:
-    """Cloudinary signs by sorting params alphabetically, joining as
-    key=value pairs with '&', appending the api_secret, and taking SHA1."""
     to_sign = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
     to_sign += api_secret
     return hashlib.sha1(to_sign.encode("utf-8")).hexdigest()
@@ -53,19 +66,37 @@ def upload_to_cloudinary(video_path: str, public_id: str, folder: str) -> str:
     return result["secure_url"]
 
 
-def schedule_buffer_post(profile_id: str, text: str, video_url: str, scheduled_at: int) -> dict:
-    url = f"{BUFFER_API}/updates/create.json"
-    data = {
-        "access_token": BUFFER_TOKEN,
-        "profile_ids[]": profile_id,
+def schedule_buffer_post(channel_id: str, text: str, video_url: str, due_at_unix: int, metadata=None) -> dict:
+    due_at_iso = datetime.fromtimestamp(due_at_unix, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    input_obj = {
         "text": text,
-        "scheduled_at": scheduled_at,
-        "media[video]": video_url,
+        "channelId": channel_id,
+        "schedulingType": "automatic",
+        "mode": "customScheduled",
+        "dueAt": due_at_iso,
+        "assets": [{"video": {"url": video_url}}],
     }
-    resp = requests.post(url, data=data, timeout=60)
+    if metadata:
+        input_obj["metadata"] = metadata
+
+    resp = requests.post(
+        BUFFER_GRAPHQL_URL,
+        json={"query": CREATE_POST_MUTATION, "variables": {"input": input_obj}},
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {BUFFER_TOKEN}",
+        },
+        timeout=60,
+    )
     result = resp.json()
-    if resp.status_code >= 400 or result.get("success") is False:
-        print(f"  BUFFER ERROR for profile {profile_id}: {result}", file=sys.stderr)
+
+    if resp.status_code >= 400 or "errors" in result:
+        print(f"  BUFFER ERROR for channel {channel_id}: {result.get('errors', result)}", file=sys.stderr)
+    else:
+        data = (result.get("data") or {}).get("createPost", {})
+        if data.get("__typename") == "MutationError":
+            print(f"  BUFFER ERROR for channel {channel_id}: {data.get('message')}", file=sys.stderr)
     return result
 
 
@@ -90,14 +121,22 @@ def main():
         )
         print(f"  -> {secure_url}")
 
-        scheduled_at = int(day["scheduled_at_unix"])
+        due_at_unix = int(day["scheduled_at_unix"])
 
-        for platform, profile_id in channels.items():
+        for platform, channel_id in channels.items():
             caption_key = f"{platform}_text"
             text = day[caption_key]
-            print(f"  Scheduling Day {n} on {platform} ({profile_id}) for {day['date']} 9am...")
-            result = schedule_buffer_post(profile_id, text, secure_url, scheduled_at)
-            print(f"    result: {result.get('success', result)}")
+
+            metadata = None
+            if platform == "youtube":
+                metadata = {"youtube": {"title": day["title"], "categoryId": "22"}}
+            elif platform == "facebook":
+                metadata = {"facebook": {"type": "reel"}}
+
+            print(f"  Scheduling Day {n} on {platform} ({channel_id}) for {day['date']} 9am...")
+            result = schedule_buffer_post(channel_id, text, secure_url, due_at_unix, metadata)
+            data = (result.get("data") or {}).get("createPost", {})
+            print(f"    result: {data.get('__typename', result)}")
 
 
 if __name__ == "__main__":
