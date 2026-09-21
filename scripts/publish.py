@@ -68,16 +68,23 @@ def upload_to_cloudinary(video_path: str, public_id: str, folder: str) -> str:
 
 
 def schedule_buffer_post(channel_id: str, text: str, video_url: str, due_at_unix: int, metadata=None) -> dict:
-    due_at_iso = datetime.fromtimestamp(due_at_unix, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-
     input_obj = {
         "text": text,
         "channelId": channel_id,
         "schedulingType": "automatic",
-        "mode": "customScheduled",
-        "dueAt": due_at_iso,
         "assets": [{"video": {"url": video_url}}],
     }
+
+    if due_at_unix <= int(time.time()):
+        # The intended slot has already passed (e.g. the workflow ran late in
+        # the day) -- Buffer rejects a customScheduled dueAt in the past, so
+        # share it immediately instead of failing the post outright.
+        print(f"    [buffer] due time already passed for channel {channel_id}; posting now instead")
+        input_obj["mode"] = "shareNow"
+    else:
+        input_obj["mode"] = "customScheduled"
+        input_obj["dueAt"] = datetime.fromtimestamp(due_at_unix, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
     if metadata:
         input_obj["metadata"] = metadata
 
@@ -96,8 +103,9 @@ def schedule_buffer_post(channel_id: str, text: str, video_url: str, due_at_unix
         print(f"  BUFFER ERROR for channel {channel_id}: {result.get('errors', result)}", file=sys.stderr)
     else:
         data = (result.get("data") or {}).get("createPost", {})
-        if data.get("__typename") == "MutationError":
-            print(f"  BUFFER ERROR for channel {channel_id}: {data.get('message')}", file=sys.stderr)
+        typename = data.get("__typename")
+        if typename and typename != "PostActionSuccess":
+            print(f"  BUFFER ERROR for channel {channel_id}: [{typename}] {data.get('message')}", file=sys.stderr)
     return result
 
 
