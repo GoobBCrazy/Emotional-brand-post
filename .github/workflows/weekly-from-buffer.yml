@@ -1,0 +1,64 @@
+name: Weekly Content From Buffer
+
+on:
+  schedule:
+    - cron: '0 16 * * 0'   # Sundays 16:00 UTC (11 AM CDT / 10 AM CST), after the Cowork routine finishes
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Only build the manifest (no videos, no posts, no commit)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: weekly-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install requests pillow numpy
+
+      - name: Build manifest from Buffer ideas
+        id: fetch
+        env:
+          BUFFER_ACCESS_TOKEN: ${{ secrets.BUFFER_ACCESS_TOKEN }}
+        run: python scripts/fetch_manifest.py
+
+      - name: Show manifest (dry run)
+        if: steps.fetch.outputs.found == 'true' && inputs.dry_run
+        run: cat "content/${{ steps.fetch.outputs.week }}/manifest.json"
+
+      - name: Install ffmpeg
+        if: steps.fetch.outputs.found == 'true' && !inputs.dry_run
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Build videos, upload, and schedule posts
+        if: steps.fetch.outputs.found == 'true' && !inputs.dry_run
+        env:
+          CLOUDINARY_CLOUD_NAME: ${{ secrets.CLOUDINARY_CLOUD_NAME }}
+          CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
+          CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
+          BUFFER_ACCESS_TOKEN: ${{ secrets.BUFFER_ACCESS_TOKEN }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+        run: python scripts/publish.py
+
+      - name: Save the week's manifest to the repo
+        if: steps.fetch.outputs.found == 'true' && !inputs.dry_run
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add content/
+          git commit -m "Weekly content ${{ steps.fetch.outputs.week }} [skip ci]"
+          git push
